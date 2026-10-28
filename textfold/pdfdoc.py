@@ -63,6 +63,29 @@ def _text(s):
     return (s or "").strip()
 
 
+# a code block's own fence, as the engine writes it ("```txt" ... "```", or with ~~~)
+FENCED = re.compile(r"\A((`|~)\2{2,})([^\n`]*)(?:\n(.*))?\n {0,3}\1\2*\Z", re.S)
+
+
+def _fenced(sc):
+    """Whether its code blocks come with their own fence: the engine's do; TextFold's own readers' are the code as
+    written (which may be a fenced snippet itself, in a page about Markdown)."""
+    return ((sc.get("metadata", {}).get("producer") or {}).get("name") or "mineru") == "mineru"
+
+
+def _unfence(code):
+    """(its language, the code) of a code block the engine fenced; ("", code) when it has no fence."""
+    m = FENCED.match(code)
+    return (m.group(3).strip(), m.group(4) or "") if m else ("", code)
+
+
+def _code_md(lang, body):
+    """A code block as Markdown: fenced longer than any run of backticks in it, so a line of ``` in it stays code."""
+    longest = max(map(len, re.findall(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{lang}\n{body}\n{fence}"
+
+
 def _md_escape_heading(s):
     return re.sub(r"\s+", " ", s).strip().lstrip("#").strip()
 
@@ -202,6 +225,7 @@ def to_markdown(sc, name="", crops=None, want=None):
     # a PDF or a picture (a page); else a file whose structure is in it (Word, EPUB, ...): its headings' depths are
     # its own, its text is all the author's (no running heads, stamps or front matter to tell from it)
     paged = (sc.get("metadata", {}).get("file_suffix") or "pdf") == "pdf"
+    fenced = _fenced(sc)
     blocks = [b for p in sc.get("pages", []) for b in p.get("blocks", []) if b.get("type") not in DROP]
     page_of = {id(b): p.get("page_idx", n) + 1 for n, p in enumerate(sc.get("pages", [])) for b in p.get("blocks", [])}
     zones = _zones(blocks, page_of)
@@ -274,7 +298,7 @@ def to_markdown(sc, name="", crops=None, want=None):
             content = _unwrap(content)
         if b is lead:
             continue
-        if not paged:
+        if not paged and kind != "code":   # (code as written: its links and marks kept)
             content = re.sub(r"\s*\u21a9\ufe0e?", "", _local_links(content))   # (a footnote's way back to its mark: ↩)
             if kind == "text" and (ABSTRACT.match(_unwrap(content)) or REFS.match(_unwrap(content))):
                 kind, content = "paragraph_title", _unwrap(content)   # "Abstract", "**References**": a heading
@@ -352,7 +376,7 @@ def to_markdown(sc, name="", crops=None, want=None):
             notes.append(content)
             continue
         if kind == "code":
-            out.append("```\n" + content + "\n```")
+            out.append(_code_md(*(_unfence(content) if fenced else ("", content))))
             continue
         if content:
             out.append(content)
@@ -454,6 +478,7 @@ def layout_of(sc):
     want = []
     to_markdown(sc, want=want)
     whole = {i: w["box"] for w in want for i in w["blocks"]}
+    fenced = _fenced(sc)
     out = []
     for n, page in enumerate(sc.get("pages", [])):
         no = page.get("page_idx", n) + 1
@@ -469,7 +494,11 @@ def layout_of(sc):
                         out.append({"p": no, "b": [round(float(x), 4) for x in c["bbox"]], "t": _text(c.get("content")), "fig": fig})
                 if kind == "image":
                     continue
-            text = re.sub(r"<[^>]+>", " ", _text(b.get("content")))
+            text = _text(b.get("content"))
+            if kind != "code":
+                text = re.sub(r"<[^>]+>", " ", text)
+            elif fenced:
+                _, text = _unfence(text)
             if text:
                 out.append({"p": no, "b": box, "t": text[:4000]})
     return out
